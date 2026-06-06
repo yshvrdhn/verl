@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How verl uses Ray for RL training — a concept explainer</title>
+<style>
+  :root {
+    --ivory:   #FAF9F5;
+    --slate:   #141413;
+    --clay:    #D97757;
+    --oat:     #E3DACC;
+    --olive:   #788C5D;
+    --sky:     #6A8CAF;
+    --gray-150:#F0EEE6;
+    --gray-300:#D1CFC5;
+    --gray-500:#87867F;
+    --gray-700:#3D3D3A;
+    --serif: ui-serif, Georgia, "Times New Roman", serif;
+    --sans:  system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono:  ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--ivory);
+    color: var(--gray-700);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    padding: 56px 24px 120px;
+  }
+  .page {
+    max-width: 1100px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 250px;
+    gap: 48px;
+  }
+  @media (max-width: 960px) { .page { grid-template-columns: 1fr; } aside { order: 2; position: static; } }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--gray-500);
+    margin-bottom: 10px;
+  }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 33px;
+    color: var(--slate);
+    letter-spacing: -0.01em;
+    margin-bottom: 12px;
+    line-height: 1.2;
+  }
+  .lead { max-width: 660px; margin-bottom: 8px; }
+  .lead em { color: var(--slate); font-style: italic; }
+  h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 22px;
+    color: var(--slate);
+    margin: 40px 0 12px;
+  }
+  p { margin-bottom: 12px; max-width: 680px; }
+  code { font-family: var(--mono); font-size: 13px; color: var(--slate); }
+  .term { border-bottom: 1.5px dotted var(--clay); cursor: help; color: var(--slate); }
+
+  /* demo panel */
+  .demo {
+    border: 1.5px solid var(--gray-300);
+    border-radius: 14px;
+    background: #fff;
+    padding: 24px;
+    margin: 12px 0 8px;
+  }
+  .demo-grid { display: grid; grid-template-columns: 1fr 300px; gap: 28px; align-items: start; }
+  @media (max-width: 760px) { .demo-grid { grid-template-columns: 1fr; } }
+
+  svg.stage { display: block; width: 100%; }
+  .stage text { font-family: var(--mono); }
+  .stage .lbl { font-size: 10px; fill: var(--gray-500); }
+  .stage .num { font-size: 9px; fill: #fff; font-weight: 600; }
+  .stage .driver { fill: rgba(217,119,87,0.12); stroke: var(--clay); stroke-width: 1.5; }
+  .stage .worker { fill: #fff; stroke: var(--gray-300); stroke-width: 1.5; transition: fill 250ms, stroke 250ms; }
+  .stage .worker.busy { fill: rgba(120,140,93,0.18); stroke: var(--olive); }
+  .stage .arrow { stroke: var(--gray-300); stroke-width: 1.4; fill: none; transition: stroke 250ms; }
+  .stage .arrow.on { stroke: var(--clay); }
+  .stage .ttl { font-size: 11px; fill: var(--slate); font-weight: 600; }
+  .stage .pad { opacity: 0.4; }
+
+  .controls { font-size: 13px; }
+  .controls .row { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+  .controls label { width: 92px; color: var(--gray-500); font-family: var(--mono); font-size: 11px; }
+  .controls .val { font-family: var(--mono); font-size: 12px; color: var(--slate); width: 30px; text-align: right; }
+  .controls input[type=range] { flex: 1; accent-color: var(--clay); }
+  .controls button {
+    appearance: none; border: 1.5px solid var(--gray-300); background: var(--gray-150);
+    border-radius: 6px; font-family: var(--mono); font-size: 11px; padding: 7px 12px;
+    cursor: pointer; margin-right: 6px;
+  }
+  .controls button.primary { background: var(--clay); color: #fff; border-color: var(--clay); }
+  .controls button:hover { filter: brightness(0.97); }
+  .readout {
+    border-top: 1px solid var(--gray-300); margin-top: 16px; padding-top: 14px; font-size: 12.5px;
+    font-family: var(--mono); color: var(--gray-700); line-height: 1.7;
+  }
+  .readout b { color: var(--slate); }
+  .readout .phase { color: var(--clay); }
+
+  /* TL;DR */
+  .tldr {
+    border: 1.5px solid var(--gray-300); border-left: 3px solid var(--clay);
+    border-radius: 10px; background: #fff; padding: 16px 18px; margin: 14px 0 8px; max-width: 680px;
+  }
+  .tldr b { color: var(--slate); }
+
+  /* compare table */
+  table { border-collapse: collapse; width: 100%; max-width: 680px; font-size: 13.5px; margin: 12px 0; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--gray-300); vertical-align: top; }
+  th { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--gray-500); font-weight: 500; }
+  td.bad { color: #B04A3F; }
+  td.good { color: var(--olive); }
+
+  .callout {
+    display: flex; gap: 12px; border: 1.5px solid var(--oat); background: rgba(227,218,204,0.35);
+    border-radius: 10px; padding: 14px 16px; margin: 18px 0; font-size: 14px; max-width: 680px;
+  }
+  .callout .ico { color: var(--clay); font-weight: 600; }
+
+  pre.code {
+    background: var(--slate); color: #E8E6DC; font-family: var(--mono); font-size: 12.5px;
+    line-height: 1.7; border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin: 12px 0; max-width: 680px;
+  }
+  pre.code .dim { color: var(--gray-500); }
+  pre.code .kw  { color: #C9B98A; }
+  pre.code .str { color: #A8BC8C; }
+  pre.code .fn  { color: #E0A872; }
+
+  /* glossary */
+  aside { position: sticky; top: 32px; align-self: start; }
+  aside .panel {
+    border: 1.5px solid var(--gray-300); border-radius: 12px; background: #fff; padding: 18px 18px 8px; margin-bottom: 18px;
+  }
+  aside .label {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--gray-500); margin-bottom: 12px;
+  }
+  aside dl dt { font-family: var(--serif); font-size: 15px; color: var(--slate); margin-top: 0; }
+  aside dl dd { font-size: 12.5px; line-height: 1.5; color: var(--gray-700); margin: 2px 0 14px; }
+  aside dl dt.hl, aside dl dt.hl + dd { background: rgba(217,119,87,0.10); margin-left: -8px; margin-right: -8px; padding-left: 8px; padding-right: 8px; border-radius: 4px; }
+  aside .navlinks a { display: block; font-size: 13px; color: var(--clay); text-decoration: none; padding: 4px 0; }
+  aside .navlinks a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <main>
+    <div class="eyebrow">Research &amp; Learning · concept explainer · verl</div>
+    <h1>How verl drives a GPU cluster with one Python process</h1>
+    <p class="lead">
+      RL post-training (PPO, GRPO) is really <em>two</em> programs tangled together: a small, ever-changing
+      <span class="term" data-term="control">control flow</span> — <code>generate → score → advantage → update</code> —
+      and a giant, multi-GPU <span class="term" data-term="compute">computation flow</span>. verl keeps the control
+      flow in <em>one ordinary process</em> (the <span class="term" data-term="driver">single controller</span>) and pushes the
+      heavy work onto a fleet of <span class="term" data-term="worker">Ray actors</span>, one per GPU. This page is the mental model.
+    </p>
+
+    <div class="tldr">
+      <b>The one idea</b> — Ray lets you call a Python <em>class method</em> as a remote procedure. verl wraps a
+      <em>group</em> of those actors behind a proxy so that <code>wg.generate_sequences(batch)</code> — a plain method
+      call on the driver — secretly <b>splits</b> the batch across every GPU, runs it in parallel, and <b>merges</b> the
+      results back. The distributed code reads exactly like the single-process code.
+    </div>
+
+    <h2>The trick: one call, fanned out and gathered</h2>
+    <p>
+      Move the sliders and press <b>Run a stage</b>. A batch of <span class="term" data-term="dataproto">DataProto</span> rows
+      enters the <span class="term" data-term="driver">driver</span>, gets <span class="term" data-term="dispatch">chunked</span>
+      across the <span class="term" data-term="worker">workers</span> (auto-padded to a multiple of the world size), each
+      GPU computes on its shard, and the outputs are <span class="term" data-term="collect">collected</span> back into one batch.
+    </p>
+
+    <div class="demo">
+      <div class="demo-grid">
+        <svg class="stage" id="stage" viewBox="0 0 460 300"></svg>
+        <div class="controls">
+          <div class="row">
+            <label>batch rows</label>
+            <input id="bSlider" type="range" min="4" max="48" value="20" step="1">
+            <span class="val" id="bVal">20</span>
+          </div>
+          <div class="row">
+            <label>GPUs (world)</label>
+            <input id="wSlider" type="range" min="1" max="8" value="4" step="1">
+            <span class="val" id="wVal">4</span>
+          </div>
+          <div style="margin-bottom:6px;">
+            <button class="primary" id="run">Run a stage ▶</button>
+            <button id="reset">reset</button>
+          </div>
+          <div class="row" style="margin-top:10px;">
+            <label>stage</label>
+            <select id="phaseSel" style="flex:1;font-family:var(--mono);font-size:11px;padding:5px;border:1.5px solid var(--gray-300);border-radius:6px;background:var(--gray-150);">
+              <option value="generate_sequences">generate_sequences</option>
+              <option value="compute_log_prob">compute_log_prob</option>
+              <option value="compute_values">compute_values</option>
+              <option value="update_actor">update_actor</option>
+            </select>
+          </div>
+          <div class="readout" id="readout"></div>
+        </div>
+      </div>
+    </div>
+    <p style="font-size:13px; color:var(--gray-500); max-width:660px;">
+      Faded cells are <b>padding</b> rows verl adds so the batch divides evenly across GPUs — they're sliced off again
+      during collect. The driver itself holds the whole batch between stages; that's what makes the loop debuggable.
+    </p>
+
+    <h2>Why split control from computation?</h2>
+    <p>
+      Most distributed training is <span class="term" data-term="spmd">SPMD</span>: launch N identical processes, every
+      rank runs the same script. That's great for one model, but PPO juggles <em>several</em> models (actor, critic,
+      reference, reward) with different parallelism — and you can't easily set a breakpoint to inspect a reward tensor
+      when every rank is racing. verl decouples the two flows instead.
+    </p>
+    <table>
+      <thead><tr><th></th><th>Fused / SPMD multi-controller</th><th>verl single controller</th></tr></thead>
+      <tbody>
+        <tr><td>Who runs the algorithm</td><td>every GPU, in lockstep</td><td class="good">one driver process</td></tr>
+        <tr><td>Swap FSDP → Megatron</td><td class="bad">rewrite the loop</td><td class="good">change a config; loop untouched</td></tr>
+        <tr><td>New advantage estimator</td><td class="bad">edit distributed code</td><td class="good">plain Python on the driver</td></tr>
+        <tr><td>Inspect intermediate tensors</td><td class="bad">hard (N racing ranks)</td><td class="good">breakpoint in <code>fit()</code></td></tr>
+        <tr><td>Cost</td><td class="good">no extra data hops</td><td>serialize <code>DataProto</code> per stage</td></tr>
+      </tbody>
+    </table>
+
+    <h2>What "effective" means here</h2>
+    <p>
+      The driver doesn't just farm out work — verl uses Ray's primitives to pack the cluster tightly:
+    </p>
+    <ul style="padding-left:20px; max-width:680px;">
+      <li style="margin-bottom:8px;"><b>Placement groups with <code>STRICT_PACK</code></b> reserve a whole node's GPUs together, so
+        the colocated <span class="term" data-term="hybrid">hybrid engine</span> can ship fresh policy weights to the rollout
+        engine over intra-node NCCL — no checkpoint round-trip per step.</li>
+      <li style="margin-bottom:8px;"><b>One Ray actor multiplexes many roles.</b> <code>create_colocated_worker_cls</code> fuses
+        actor + rollout + reference onto the <em>same</em> GPU set, so reserved hardware is never idle.</li>
+      <li style="margin-bottom:8px;"><b>Async by default.</b> Worker calls return Ray <code>ObjectRef</code> futures; independent
+        stages overlap and only synchronize when a blocking collect needs the data.</li>
+      <li><b>Sleep / wake.</b> During the training phase the vLLM rollout engine sleeps to free KV-cache memory, then wakes
+        and receives updated weights before the next generation.</li>
+    </ul>
+
+    <div class="callout">
+      <span class="ico">★</span>
+      <div>The whole PPO step is one readable loop in <code>RayPPOTrainer.fit()</code>. Each <code>wg.method(batch)</code>
+        fans out to every GPU; <code>compute_advantage(...)</code> is plain Python on the driver. That separation is the
+        entire HybridFlow design.</div>
+    </div>
+
+    <h2>The loop, in eight lines</h2>
+    <pre class="code"><span class="dim"># verl/trainer/ppo/ray_trainer.py — RayPPOTrainer.fit()  (paraphrased)</span>
+<span class="kw">for</span> prompt <span class="kw">in</span> dataloader:
+    output       = actor_rollout_ref_wg.<span class="fn">generate_sequences</span>(prompt)   <span class="dim"># fan-out → vLLM on N GPUs</span>
+    old_log_prob = actor_rollout_ref_wg.<span class="fn">compute_log_prob</span>(output)
+    ref_log_prob = ref_policy_wg.<span class="fn">compute_ref_log_prob</span>(output)
+    values       = critic_wg.<span class="fn">compute_values</span>(output)
+    rewards      = reward_wg.<span class="fn">compute_rm_score</span>(output)
+    advantages   = <span class="fn">compute_advantages</span>(values, rewards)              <span class="dim"># runs on the driver</span>
+    actor_rollout_ref_wg.<span class="fn">update_actor</span>(output.union(advantages))
+    critic_wg.<span class="fn">update_critic</span>(output)</pre>
+
+    <p style="margin-top:20px;">
+      Want the wiring under each call — <code>@register</code>, dispatch modes, placement groups, the colocated
+      <code>WorkerDict</code>? See the <a href="tech-deep-dive.html" style="color:var(--clay);">technical deep dive</a>
+      and the <a href="verl-ray-rl-training.md" style="color:var(--clay);">full markdown breakdown</a>.
+    </p>
+  </main>
+
+  <aside>
+    <div class="panel">
+      <div class="label">On this page</div>
+      <div class="navlinks">
+        <a href="tech-deep-dive.html">→ Technical deep dive</a>
+        <a href="verl-ray-rl-training.md">→ Markdown breakdown</a>
+        <a href="status.html">→ Documentation status</a>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="label">Glossary</div>
+      <dl id="gloss">
+        <dt data-g="driver">Single controller</dt>
+        <dd>The one driver process running the RL algorithm. Holds the batch, holds no model weights.</dd>
+        <dt data-g="worker">Worker / Ray actor</dt>
+        <dd>A <code>@ray.remote</code> object pinned to one GPU that holds model shards and does the math.</dd>
+        <dt data-g="control">Control flow</dt>
+        <dd>The algorithm's high-level steps. Small, sequential, changes per algorithm.</dd>
+        <dt data-g="compute">Computation flow</dt>
+        <dd>The neural-net work: rollout, forward, backward, optimizer. Multi-GPU, rarely changes.</dd>
+        <dt data-g="dispatch">Dispatch</dt>
+        <dd>Splitting a batch across workers — e.g. <code>DataProto.chunk(world_size)</code> with auto-padding.</dd>
+        <dt data-g="collect">Collect</dt>
+        <dd>Merging each worker's output back into one <code>DataProto</code> via <code>concat</code>.</dd>
+        <dt data-g="dataproto">DataProto</dt>
+        <dd>The batch container that travels driver↔worker and knows how to chunk/concat itself.</dd>
+        <dt data-g="hybrid">Hybrid engine</dt>
+        <dd>Training and inference colocated on the same GPUs, taking turns via sleep/wake.</dd>
+        <dt data-g="spmd">SPMD</dt>
+        <dd>Single-Program-Multiple-Data — the lockstep model verl deliberately avoids for control flow.</dd>
+      </dl>
+    </div>
+  </aside>
+
+</div>
+
+<script>
+const COLORS = ["#D97757", "#788C5D", "#6A8CAF", "#C2A83E", "#B04A3F", "#3D6E6E", "#A67C52", "#87867F"];
+const svg = document.getElementById("stage");
+const bSlider = document.getElementById("bSlider");
+const wSlider = document.getElementById("wSlider");
+const bVal = document.getElementById("bVal");
+const wVal = document.getElementById("wVal");
+const readout = document.getElementById("readout");
+const phaseSel = document.getElementById("phaseSel");
+
+function ceilDiv(a, b){ return Math.ceil(a / b); }
+
+function draw(phase){
+  const rows = +bSlider.value, W = +wSlider.value;
+  const per = ceilDiv(rows, W);           // rows per worker after padding
+  const padded = per * W;
+  const pad = padded - rows;
+  bVal.textContent = rows; wVal.textContent = W;
+
+  const VW = 460, driverX = 30, driverW = 110, driverY = 110, driverH = 80;
+  const wx = 250, ww = 180;
+  const topY = 20, botY = 280;
+  const slotH = Math.min(30, (botY - topY) / W - 6);
+  const gap = (botY - topY - slotH * W) / (W + 1);
+
+  let s = "";
+  // driver box
+  s += `<rect class="driver" x="${driverX}" y="${driverY}" width="${driverW}" height="${driverH}" rx="10"/>`;
+  s += `<text class="ttl" x="${driverX + driverW/2}" y="${driverY + 30}" text-anchor="middle">driver</text>`;
+  s += `<text class="lbl" x="${driverX + driverW/2}" y="${driverY + 46}" text-anchor="middle">fit()</text>`;
+  s += `<text class="lbl" x="${driverX + driverW/2}" y="${driverY + 62}" text-anchor="middle">${rows} rows</text>`;
+
+  // worker boxes + arrows
+  for (let i = 0; i < W; i++){
+    const y = topY + gap + i * (slotH + gap);
+    const busy = (phase === "run");
+    s += `<path class="arrow${busy ? ' on' : ''}" d="M ${driverX+driverW} ${driverY+driverH/2} C ${(driverX+driverW+wx)/2} ${driverY+driverH/2}, ${(driverX+driverW+wx)/2} ${y+slotH/2}, ${wx} ${y+slotH/2}"/>`;
+    s += `<rect class="worker${busy ? ' busy' : ''}" x="${wx}" y="${y}" width="${ww}" height="${slotH}" rx="6"/>`;
+    s += `<text class="lbl" x="${wx+8}" y="${y+slotH/2+3}">GPU ${i}</text>`;
+    // row cells inside worker
+    const cellArea = ww - 60, cellW = Math.min(14, cellArea / per - 2);
+    for (let j = 0; j < per; j++){
+      const globalIdx = i * per + j;
+      const isPad = globalIdx >= rows;
+      const cx = wx + 56 + j * (cellW + 2);
+      s += `<rect class="${isPad ? 'pad' : ''}" x="${cx}" y="${y + (slotH-cellW)/2}" width="${cellW}" height="${cellW}" rx="2" fill="${isPad ? '#D1CFC5' : COLORS[i % COLORS.length]}"/>`;
+    }
+  }
+  // labels
+  s += `<text class="lbl" x="${wx + ww/2}" y="12" text-anchor="middle">workers · ${per} rows each</text>`;
+  svg.innerHTML = s;
+
+  const phaseName = phaseSel.value;
+  if (phase === "run"){
+    readout.innerHTML =
+      `<span class="phase">▶ ${phaseName}</span><br>` +
+      `dispatch_dp: <b>${rows}</b> rows → <b>${W}</b> shards of <b>${per}</b><br>` +
+      `auto-pad: +<b>${pad}</b> row${pad===1?'':'s'} → ${padded}<br>` +
+      `${W} async Ray RPCs in flight…<br>` +
+      `collect: concat → <b>${rows}</b> rows back`;
+  } else {
+    readout.innerHTML =
+      `<b>${rows}</b> rows · world_size <b>${W}</b><br>` +
+      `would split into <b>${per}</b>/worker (pad +${pad})<br>` +
+      `press <b>Run a stage</b> to dispatch`;
+  }
+}
+
+let runTimer = null;
+function run(){
+  draw("run");
+  if (runTimer) clearTimeout(runTimer);
+  runTimer = setTimeout(() => draw("idle"), 1600);
+}
+
+bSlider.oninput = () => draw("idle");
+wSlider.oninput = () => draw("idle");
+phaseSel.onchange = () => draw("idle");
+document.getElementById("run").onclick = run;
+document.getElementById("reset").onclick = () => { bSlider.value = 20; wSlider.value = 4; phaseSel.value = "generate_sequences"; draw("idle"); };
+
+// glossary highlight
+document.querySelectorAll(".term").forEach(el => {
+  const g = el.dataset.term;
+  el.addEventListener("mouseenter", () => document.querySelector(`dt[data-g="${g}"]`)?.classList.add("hl"));
+  el.addEventListener("mouseleave", () => document.querySelector(`dt[data-g="${g}"]`)?.classList.remove("hl"));
+});
+
+draw("idle");
+</script>
+</body>
+</html>

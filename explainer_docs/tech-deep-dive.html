@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How verl's single controller drives Ray — a technical deep dive</title>
+<style>
+  :root {
+    --ivory: #FAF9F5;
+    --slate: #141413;
+    --clay: #D97757;
+    --oat: #E3DACC;
+    --olive: #788C5D;
+    --rust: #B04A3F;
+    --sky: #6A8CAF;
+    --gray-150: #F0EEE6;
+    --gray-300: #D1CFC5;
+    --gray-500: #87867F;
+    --gray-700: #3D3D3A;
+    --serif: ui-serif, Georgia, 'Times New Roman', serif;
+    --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    --mono: ui-monospace, 'SF Mono', Menlo, Monaco, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--ivory); color: var(--gray-700); font-family: var(--sans);
+    font-size: 15px; line-height: 1.65; padding: 48px 24px 80px;
+  }
+  .page { max-width: 1080px; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 40px; }
+  @media (max-width: 960px) { .page { grid-template-columns: 1fr; } }
+
+  header { grid-column: 1 / -1; margin-bottom: 8px; }
+  .repo-line { font-family: var(--mono); font-size: 12.5px; color: var(--gray-500); margin-bottom: 10px; }
+  h1 { font-family: var(--serif); font-weight: 500; font-size: 32px; line-height: 1.25; color: var(--slate); margin-bottom: 16px; }
+  .summary { max-width: 780px; font-size: 15.5px; }
+  .summary code { font-family: var(--mono); font-size: 13px; color: var(--slate); }
+  h2 { font-family: var(--serif); font-weight: 500; font-size: 22px; color: var(--slate); margin: 36px 0 16px; }
+
+  /* diagram */
+  .diagram-panel { border: 1.5px solid var(--gray-300); border-radius: 12px; background: #fff; padding: 20px; overflow-x: auto; }
+  svg.flow { display: block; max-width: 100%; }
+  .flow text { font-family: var(--mono); font-size: 12px; fill: var(--slate); }
+  .flow .sub { font-size: 10px; fill: var(--gray-500); }
+  .flow .box { fill: #fff; stroke: var(--gray-300); stroke-width: 1.5; }
+  .flow .box.hot { fill: rgba(217,119,87,0.10); stroke: var(--clay); }
+  .flow .box.cool { fill: rgba(106,140,175,0.10); stroke: var(--sky); }
+  .flow .arrow { stroke: var(--gray-500); stroke-width: 1.5; fill: none; }
+  .flow .albl { font-size: 10px; fill: var(--gray-500); }
+
+  /* walkthrough steps */
+  .step { display: grid; grid-template-columns: 44px 1fr; gap: 18px; padding: 20px 0; border-bottom: 1.5px solid var(--gray-150); }
+  .step:last-of-type { border-bottom: none; }
+  .badge {
+    width: 34px; height: 34px; border-radius: 50%; background: var(--oat); border: 1.5px solid var(--gray-300);
+    display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-weight: 600; color: var(--slate); font-size: 14px;
+  }
+  .step.hot .badge { background: rgba(217,119,87,0.14); border-color: var(--clay); color: var(--clay); }
+  .step-loc { font-family: var(--mono); font-size: 13px; color: var(--slate); margin-bottom: 6px; }
+  .step-loc .range { color: var(--gray-500); }
+  .step-body p { margin-bottom: 10px; }
+  .step-body code { font-family: var(--mono); font-size: 12.5px; color: var(--slate); }
+
+  details.snippet { margin-top: 6px; }
+  details.snippet summary {
+    list-style: none; cursor: pointer; font-size: 12.5px; color: var(--gray-500); font-family: var(--mono);
+    display: inline-flex; align-items: center; gap: 6px; padding: 4px 0; user-select: none;
+  }
+  details.snippet summary::-webkit-details-marker { display: none; }
+  details.snippet summary::before { content: "▸"; font-size: 10px; transition: transform 0.15s ease; }
+  details.snippet[open] summary::before { transform: rotate(90deg); }
+  pre.code {
+    background: var(--slate); color: #E8E6DC; font-family: var(--mono); font-size: 12.5px; line-height: 1.7;
+    border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin-top: 10px;
+  }
+  pre.code .dim { color: var(--gray-500); }
+  pre.code .kw  { color: #C9B98A; }
+  pre.code .str { color: #A8BC8C; }
+  pre.code .fn  { color: #E0A872; }
+
+  /* sidebar */
+  aside { position: sticky; top: 24px; align-self: start; }
+  .panel { border: 1.5px solid var(--gray-300); border-radius: 12px; background: #fff; padding: 18px 20px; margin-bottom: 20px; }
+  .panel h3 { font-family: var(--sans); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--gray-500); margin-bottom: 12px; }
+  .key-files { list-style: none; padding: 0; }
+  .key-files li { margin-bottom: 12px; }
+  .key-files li:last-child { margin-bottom: 0; }
+  .key-files .path { font-family: var(--mono); font-size: 12px; color: var(--slate); display: block; margin-bottom: 2px; word-break: break-all; }
+  .key-files .desc { font-size: 12.5px; color: var(--gray-500); line-height: 1.45; }
+  .navlinks a { display: block; font-size: 13px; color: var(--clay); text-decoration: none; padding: 4px 0; }
+  .navlinks a:hover { text-decoration: underline; }
+  .gotchas { border: 1.5px solid var(--clay); border-radius: 12px; background: rgba(217,119,87,0.06); padding: 18px 20px; }
+  .gotchas h3 { font-family: var(--sans); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--clay); margin-bottom: 10px; }
+  .gotchas ul { list-style: none; padding: 0; }
+  .gotchas li { position: relative; padding-left: 16px; font-size: 13px; margin-bottom: 8px; }
+  .gotchas li::before { content: ""; position: absolute; left: 0; top: 8px; width: 5px; height: 5px; background: var(--clay); border-radius: 2px; }
+  .gotchas code { font-family: var(--mono); font-size: 11.5px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    <div class="repo-line">verl-project/verl · architecture note · single_controller + ray_trainer</div>
+    <h1>How verl's single controller turns one method call into a cluster-wide job</h1>
+    <p class="summary">
+      verl runs the PPO/GRPO control loop in <b>one driver process</b> and the model math across <b>Ray actors, one per
+      GPU</b>. The bridge is <code>verl.single_controller</code>: a <code>@register</code> decorator tags each worker
+      method with a <em>dispatch policy</em>, and a <code>RayWorkerGroup</code> proxy uses that policy to split a
+      <code>DataProto</code> across workers, fire N async Ray RPCs, and concatenate the results. Below is the exact call
+      chain for one stage — <code>generate_sequences</code> — and how the GPUs get reserved and colocated underneath it.
+    </p>
+  </header>
+
+  <main>
+    <h2 style="margin-top:0">The dispatch path</h2>
+    <div class="diagram-panel">
+      <svg class="flow" viewBox="0 0 760 300" width="760" height="300" role="img" aria-label="verl single controller dispatch flow">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#87867F"></path>
+          </marker>
+        </defs>
+        <!-- driver -->
+        <g>
+          <rect class="box hot" x="20" y="120" width="150" height="64" rx="10"></rect>
+          <text x="95" y="148" text-anchor="middle">RayPPOTrainer</text>
+          <text class="sub" x="95" y="164" text-anchor="middle">fit() · driver</text>
+        </g>
+        <!-- worker group -->
+        <g>
+          <rect class="box" x="230" y="120" width="160" height="64" rx="10"></rect>
+          <text x="310" y="144" text-anchor="middle">RayWorkerGroup</text>
+          <text class="sub" x="310" y="160" text-anchor="middle">dispatch · execute · collect</text>
+        </g>
+        <!-- workers -->
+        <g>
+          <rect class="box cool" x="470" y="40" width="160" height="46" rx="8"></rect>
+          <text x="550" y="62" text-anchor="middle">Worker · GPU 0</text>
+          <text class="sub" x="550" y="76" text-anchor="middle">actor+rollout+ref</text>
+        </g>
+        <g>
+          <rect class="box cool" x="470" y="128" width="160" height="46" rx="8"></rect>
+          <text x="550" y="150" text-anchor="middle">Worker · GPU 1</text>
+          <text class="sub" x="550" y="164" text-anchor="middle">actor+rollout+ref</text>
+        </g>
+        <g>
+          <rect class="box cool" x="470" y="216" width="160" height="46" rx="8"></rect>
+          <text x="550" y="238" text-anchor="middle">Worker · GPU n</text>
+          <text class="sub" x="550" y="252" text-anchor="middle">actor+rollout+ref</text>
+        </g>
+        <!-- placement group bracket -->
+        <rect x="456" y="28" width="190" height="246" rx="12" fill="none" stroke="#D1CFC5" stroke-dasharray="4 4"></rect>
+        <text class="sub" x="551" y="288" text-anchor="middle">placement group · STRICT_PACK</text>
+
+        <!-- arrows out -->
+        <line class="arrow" x1="170" y1="152" x2="230" y2="152" marker-end="url(#ah)"></line>
+        <text class="albl" x="200" y="142" text-anchor="middle">.generate_sequences(batch)</text>
+        <line class="arrow" x1="390" y1="146" x2="470" y2="63"  marker-end="url(#ah)"></line>
+        <line class="arrow" x1="390" y1="152" x2="470" y2="151" marker-end="url(#ah)"></line>
+        <line class="arrow" x1="390" y1="158" x2="470" y2="239" marker-end="url(#ah)"></line>
+        <text class="albl" x="430" y="120" text-anchor="middle">chunk → N RPCs</text>
+        <!-- arrows back -->
+        <line class="arrow" x1="470" y1="75"  x2="392" y2="170" marker-end="url(#ah)" opacity="0.5"></line>
+        <line class="arrow" x1="470" y1="245" x2="392" y2="172" marker-end="url(#ah)" opacity="0.5"></line>
+        <text class="albl" x="430" y="200" text-anchor="middle">collect → concat</text>
+      </svg>
+    </div>
+
+    <h2>Call chain, step by step</h2>
+
+    <!-- 1 -->
+    <div class="step">
+      <div class="badge">1</div>
+      <div class="step-body">
+        <div class="step-loc">verl/trainer/main_ppo.py<span class="range"> · run_ppo() / TaskRunner</span></div>
+        <p>The entrypoint calls <code>ray.init()</code>, then wraps the controller as a Ray actor —
+          <code>ray.remote(num_cpus=1)(TaskRunner)</code> — and runs it with <code>ray.get(runner.run.remote(config))</code>.
+          <code>TaskRunner.run()</code> builds a <code>RayPPOTrainer</code> and calls <code>fit()</code>. The driver is a
+          <em>single process</em> and is deliberately kept off the resource-poor Ray head node.</p>
+        <details class="snippet">
+          <summary>show source</summary>
+<pre class="code"><span class="dim"># verl/trainer/main_ppo.py</span>
+ray.init(runtime_env=..., **config.ray_kwargs)
+runner = ray.remote(num_cpus=1)(TaskRunner).remote()
+ray.get(runner.run.remote(config))      <span class="dim"># → builds RayPPOTrainer, calls .fit()</span></pre>
+        </details>
+      </div>
+    </div>
+
+    <!-- 2 -->
+    <div class="step hot">
+      <div class="badge">2</div>
+      <div class="step-body">
+        <div class="step-loc">verl/single_controller/base/decorator.py<span class="range"> · @register</span></div>
+        <p>This is the heart of the design. <code>@register</code> doesn't change what the method does — it attaches a
+          <em>dispatch policy</em> under a magic attribute so the WorkerGroup can later discover it. <code>DP_COMPUTE_PROTO</code>
+          means "split the input <code>DataProto</code> across data-parallel ranks, concat the outputs."</p>
+        <details class="snippet" open>
+          <summary>show source</summary>
+<pre class="code"><span class="dim"># the decorator (decorator.py)</span>
+MAGIC_ATTR = <span class="str">"attrs_3141562937"</span>
+
+<span class="kw">def</span> <span class="fn">register</span>(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL, blocking=<span class="kw">True</span>, ...):
+    <span class="kw">def</span> decorator(func):
+        @wraps(func)
+        <span class="kw">def</span> inner(*args, **kwargs):
+            <span class="kw">if</span> materialize_futures:
+                args, kwargs = _materialize_futures(*args, **kwargs)
+            <span class="kw">return</span> func(*args, **kwargs)
+        attrs = {<span class="str">"dispatch_mode"</span>: dispatch_mode, <span class="str">"execute_mode"</span>: execute_mode, <span class="str">"blocking"</span>: blocking}
+        setattr(inner, MAGIC_ATTR, attrs)
+        <span class="kw">return</span> inner
+    <span class="kw">return</span> decorator
+
+<span class="dim"># the worker method (verl/workers/engine_workers.py)</span>
+<span class="kw">class</span> ActorRolloutRefWorker(Worker):
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    <span class="kw">def</span> <span class="fn">generate_sequences</span>(self, prompts: DataProto): ...</pre>
+        </details>
+      </div>
+    </div>
+
+    <!-- 3 -->
+    <div class="step">
+      <div class="badge">3</div>
+      <div class="step-body">
+        <div class="step-loc">verl/single_controller/base/worker_group.py<span class="range"> :185 _bind_worker_method</span></div>
+        <p>When the <code>RayWorkerGroup</code> is built, it walks every method of the worker class. For each one carrying
+          <code>MAGIC_ATTR</code>, it looks up the <code>dispatch_fn</code> / <code>collect_fn</code> pair in
+          <code>DISPATCH_MODE_FN_REGISTRY</code> and the <code>execute_fn</code> by execute-mode, then synthesizes a brand-new
+          method <em>on the group</em> via <code>func_generator</code>. After this, <code>wg.generate_sequences</code> exists
+          and is callable like a local method.</p>
+        <details class="snippet">
+          <summary>show source</summary>
+<pre class="code"><span class="dim"># worker_group.py — binding (condensed)</span>
+<span class="kw">for</span> method_name <span class="kw">in</span> dir(user_defined_cls):
+    method = getattr(user_defined_cls, method_name)
+    <span class="kw">if</span> hasattr(method, MAGIC_ATTR):
+        attrs = getattr(method, MAGIC_ATTR)
+        dispatch_fn = DISPATCH_MODE_FN_REGISTRY[attrs[<span class="str">"dispatch_mode"</span>]][<span class="str">"dispatch_fn"</span>]
+        collect_fn  = DISPATCH_MODE_FN_REGISTRY[attrs[<span class="str">"dispatch_mode"</span>]][<span class="str">"collect_fn"</span>]
+        execute_fn  = getattr(self, get_predefined_execute_fn(attrs[<span class="str">"execute_mode"</span>])[<span class="str">"execute_fn_name"</span>])
+        func = func_generator(self, method_name, dispatch_fn, collect_fn, execute_fn, attrs[<span class="str">"blocking"</span>])
+        setattr(self, method_name, func)   <span class="dim"># wg.generate_sequences now exists</span></pre>
+        </details>
+      </div>
+    </div>
+
+    <!-- 4 -->
+    <div class="step hot">
+      <div class="badge">4</div>
+      <div class="step-body">
+        <div class="step-loc">verl/single_controller/base/decorator.py<span class="range"> · dispatch / collect</span></div>
+        <p>On the driver, calling <code>wg.generate_sequences(batch)</code> runs the generated wrapper:
+          <code>dispatch_dp_compute_data_proto</code> chunks the batch into <code>world_size</code> shards
+          (auto-padded so it divides evenly); <code>execute_all</code> fires one async Ray RPC per worker and returns
+          <code>ObjectRef</code> futures; <code>collect_dp_compute_data_proto</code> concatenates the gathered results back
+          into a single <code>DataProto</code> and strips the padding.</p>
+        <details class="snippet">
+          <summary>show source</summary>
+<pre class="code"><span class="dim"># dispatch: split a DataProto across DP ranks (decorator.py)</span>
+<span class="kw">def</span> <span class="fn">dispatch_dp_compute_data_proto</span>(worker_group, *args, **kwargs):
+    splitted_args, splitted_kwargs = _split_args_kwargs_data_proto_with_auto_padding(
+        worker_group.world_size, *args, **kwargs)
+    <span class="kw">return</span> splitted_args, splitted_kwargs
+
+<span class="dim"># what the generated wrapper does</span>
+args, kwargs = dispatch_fn(self, *args, **kwargs)   <span class="dim"># N shards</span>
+refs = execute_fn(method_name, *args, **kwargs)      <span class="dim"># N async Ray RPCs → ObjectRefs</span>
+<span class="kw">return</span> collect_fn(self, ray.get(refs)) <span class="kw">if</span> blocking <span class="kw">else</span> refs   <span class="dim"># concat back</span></pre>
+        </details>
+      </div>
+    </div>
+
+    <!-- 5 -->
+    <div class="step">
+      <div class="badge">5</div>
+      <div class="step-body">
+        <div class="step-loc">verl/single_controller/ray/base.py<span class="range"> :131 get_placement_groups</span></div>
+        <p>Where do the GPUs come from? A <code>RayResourcePool</code> turns "nodes × GPUs-per-node" into Ray
+          <b>placement groups</b> with the <code>STRICT_PACK</code> strategy — every bundle is one GPU, and all bundles of a
+          group are forced onto the <em>same node</em>. That node-locality is what lets colocated training and inference move
+          weights over fast intra-node NCCL.</p>
+        <details class="snippet">
+          <summary>show source</summary>
+<pre class="code"><span class="dim"># ray/base.py — one bundle == one worker == one GPU</span>
+bundle = {<span class="str">"CPU"</span>: self.max_colocate_count}
+<span class="kw">if</span> self.use_gpu:
+    bundle[device_name] = 1
+pg_scheme = [[bundle.copy() <span class="kw">for</span> _ <span class="kw">in</span> range(n)] <span class="kw">for</span> n <span class="kw">in</span> self._store]
+pgs = [placement_group(bundles=b, strategy=<span class="str">"STRICT_PACK"</span>, ...) <span class="kw">for</span> b <span class="kw">in</span> pg_scheme]
+ray.get([pg.ready() <span class="kw">for</span> pg <span class="kw">in</span> pgs])     <span class="dim"># block until the cluster reserves them</span></pre>
+        </details>
+      </div>
+    </div>
+
+    <!-- 6 -->
+    <div class="step">
+      <div class="badge">6</div>
+      <div class="step-body">
+        <div class="step-loc">verl/single_controller/ray/base.py<span class="range"> :988 create_colocated_worker_cls</span></div>
+        <p>To avoid giving each role its own idle GPUs, verl fuses roles onto one actor. <code>create_colocated_worker_cls</code>
+          dynamically builds a <code>WorkerDict</code> that instantiates each sub-worker and re-exports their registered
+          methods under role prefixes — so a <em>single</em> Ray actor per GPU serves actor + rollout + reference.
+          <code>spawn()</code> then hands back one WorkerGroup <em>view</em> per role.</p>
+        <details class="snippet">
+          <summary>show source</summary>
+<pre class="code"><span class="dim"># ray_trainer.py — init_workers(): one colocated actor per GPU</span>
+<span class="kw">for</span> resource_pool, class_dict <span class="kw">in</span> self.resource_pool_to_cls.items():
+    worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
+    wg_dict  = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls)
+    spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())   <span class="dim"># one WG per role</span>
+    all_wg.update(spawn_wg)</pre>
+        </details>
+      </div>
+    </div>
+
+    <!-- 7 -->
+    <div class="step hot">
+      <div class="badge">7</div>
+      <div class="step-body">
+        <div class="step-loc">verl/trainer/ppo/ray_trainer.py<span class="range"> :1362 fit()</span></div>
+        <p>Now the loop reads like single-process code. Each <code>wg.method(batch)</code> is one driver call that fans out to
+          all GPUs; <code>compute_advantage(...)</code> is plain Python on the driver, operating on already-gathered data;
+          and after <code>update_actor</code> the new weights are synced to the sleeping rollout engine before the next
+          generation. Swapping FSDP for Megatron, or changing placement, never touches this loop.</p>
+        <details class="snippet">
+          <summary>show source</summary>
+<pre class="code"><span class="dim"># ray_trainer.py — fit() (paraphrased order)</span>
+gen_out  = self.async_rollout_manager.<span class="fn">generate_sequences</span>(gen_batch)   <span class="dim"># gen; then sleep replicas</span>
+reward   = self.<span class="fn">_compute_reward_colocate</span>(batch)                       <span class="dim"># rm_score / verifiers</span>
+old_lp   = self.actor_rollout_wg.<span class="fn">compute_log_prob</span>(batch)               <span class="dim"># proximal anchor π_old</span>
+ref_lp   = self.ref_policy_wg.<span class="fn">compute_ref_log_prob</span>(batch)            <span class="dim"># for KL (optional)</span>
+values   = self.critic_wg.<span class="fn">compute_values</span>(batch)                       <span class="dim"># if use_critic</span>
+batch    = <span class="fn">compute_advantage</span>(batch, adv_estimator=...)              <span class="dim"># ON THE DRIVER</span>
+self.<span class="fn">_update_critic</span>(batch)
+self.<span class="fn">_update_actor</span>(batch)
+self.checkpoint_manager.<span class="fn">update_weights</span>(self.global_steps)          <span class="dim"># sync → rollout</span></pre>
+        </details>
+      </div>
+    </div>
+  </main>
+
+  <aside>
+    <div class="panel">
+      <h3>Related docs</h3>
+      <div class="navlinks">
+        <a href="concept-explainer.html">← Concept explainer (mental model)</a>
+        <a href="verl-ray-rl-training.md">Full markdown breakdown</a>
+        <a href="status.html">Documentation status</a>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>Key files</h3>
+      <ul class="key-files">
+        <li><span class="path">trainer/ppo/ray_trainer.py</span><span class="desc">RayPPOTrainer: init_workers + the fit() RL loop.</span></li>
+        <li><span class="path">single_controller/base/decorator.py</span><span class="desc">@register, Dispatch modes, dispatch/collect fns.</span></li>
+        <li><span class="path">single_controller/base/worker_group.py</span><span class="desc">_bind_worker_method: metadata → real methods.</span></li>
+        <li><span class="path">single_controller/ray/base.py</span><span class="desc">RayWorkerGroup, placement groups, colocation.</span></li>
+        <li><span class="path">workers/engine_workers.py</span><span class="desc">ActorRolloutRefWorker / TrainingWorker roles.</span></li>
+        <li><span class="path">protocol.py</span><span class="desc">DataProto: chunk / concat / union on the edges.</span></li>
+      </ul>
+    </div>
+    <div class="gotchas">
+      <h3>Gotchas</h3>
+      <ul>
+        <li>Every driver↔worker hop <b>serializes a DataProto</b>. Keep outputs as <code>DataProtoFuture</code>s and use
+          <code>blocking=False</code> to overlap stages and cut round-trips.</li>
+        <li><code>create_colocated_worker_cls</code> requires roles to share <b>one</b> placement group. For different
+          parallel sizes per role, give each role its own <code>ResourcePool</code> instead.</li>
+        <li>Don't schedule the driver (<code>main_task</code>) on the Ray <b>head</b> node — it holds the whole batch and is
+          memory-hungry; the head usually has little spare RAM.</li>
+      </ul>
+    </div>
+  </aside>
+
+</div>
+
+<script>
+  // keep at most one snippet open so the walkthrough stays scannable
+  var snippets = document.querySelectorAll('details.snippet');
+  snippets.forEach(function (d) {
+    d.addEventListener('toggle', function () {
+      if (!d.open) return;
+      snippets.forEach(function (other) { if (other !== d) other.open = false; });
+    });
+  });
+</script>
+</body>
+</html>
