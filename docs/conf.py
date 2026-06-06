@@ -28,6 +28,25 @@
 # import sys
 # sys.path.insert(0, os.path.abspath('.'))
 
+import os
+import shutil
+
+# -- Vendor the standalone explainer bundle ----------------------------------
+# The interactive "verl x Ray" explainers live at the repo root in
+# ``explainer_docs/`` (the single source of truth). Copy that self-contained
+# bundle into ``_static/explainer`` at build time so the demos are served by the
+# docs site without committing a second copy. See ``explainer/index.md``.
+_CONF_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXPLAINER_SRC = os.path.normpath(os.path.join(_CONF_DIR, "..", "explainer_docs"))
+_EXPLAINER_DST = os.path.join(_CONF_DIR, "_static", "explainer")
+try:
+    if os.path.isdir(_EXPLAINER_SRC):
+        shutil.copytree(_EXPLAINER_SRC, _EXPLAINER_DST, dirs_exist_ok=True)
+    else:
+        print(f"[conf.py] WARNING: explainer source not found at {_EXPLAINER_SRC!r}; skipping copy")
+except Exception as exc:  # never let asset vendoring break the docs build
+    print(f"[conf.py] WARNING: could not vendor explainer_docs: {exc}")
+
 
 # -- Project information -----------------------------------------------------
 
